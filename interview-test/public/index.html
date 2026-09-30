@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interview Assessment</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📝</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<section id="s-load" class="screen on"><div class="wrap"><p class="empty">Loading test…</p></div></section>
+
+<section id="s-none" class="screen"><div class="wrap"><div class="card">
+  <h1>No test is available yet</h1>
+  <p class="lead">The interviewer hasn't published the questions. Check back later or contact them.</p>
+</div></div></section>
+
+<section id="s-start" class="screen"><div class="wrap"><div class="card">
+  <h1 id="tTitle">Assessment</h1>
+  <p class="lead" id="tMeta"></p>
+  <p>Once you start, this page stays locked until you submit:</p>
+  <ul class="rules">
+    <li>The test runs in full screen. Leaving full screen pauses you behind a warning.</li>
+    <li>The back button, refresh and closing the tab are blocked or warned against.</li>
+    <li>Switching tabs or windows counts as a violation. <b id="ruleMax">2 violations submit your test automatically.</b></li>
+    <li>Copy, paste and right-click are turned off.</li>
+    <li>When the timer reaches zero, your answers are submitted as they are.</li>
+    <li>When you submit, a PDF copy of your answers downloads to your device.</li>
+  </ul>
+  <div class="field"><label class="f" for="name">Full name</label><input id="name" type="text" autocomplete="name" placeholder="e.g. Priya Sharma"></div>
+  <div class="field"><label class="f" for="email">Email</label><input id="email" type="email" autocomplete="email" placeholder="you@example.com"></div>
+  <button class="primary" id="startBtn">Start test</button>
+  <p class="err" id="startErr"></p>
+</div></div></section>
+
+<section id="s-test" class="screen">
+  <div class="bar"><div class="in">
+    <span class="clock" id="clock">--:--</span>
+    <span class="strikes">Violations: <b id="strikes">0</b> / <span id="maxV">2</span></span>
+    <span class="spacer"></span>
+    <button class="primary" id="submitTop">Submit test</button>
+  </div><div class="progress"><i id="prog"></i></div></div>
+  <div class="wrap">
+    <div class="q" id="qbox"></div>
+    <div class="row nav">
+      <button class="ghost" id="prevBtn">Previous</button>
+      <span class="spacer"></span>
+      <button class="primary" id="nextBtn">Next</button>
+    </div>
+    <div class="dots" id="dots"></div>
+  </div>
+</section>
+
+<section id="s-sending" class="screen"><div class="wrap"><div class="card"><h1>Submitting…</h1><p class="lead">Please keep this page open. Your PDF will download in a moment.</p></div></div></section>
+
+<section id="s-closed" class="screen"><div class="wrap"><div class="card done-card">
+  <h1>Test closed</h1>
+  <p class="lead" id="closedMsg" style="color:var(--ink)">Your answers were submitted and a PDF copy was downloaded to your device. You can close this page now.</p>
+  <button class="ghost small" id="redl" hidden>Download my PDF again</button>
+</div></div></section>
+
+<div class="overlay" id="ov"><div class="card">
+  <h2 id="ovTitle">You left the test</h2>
+  <p id="ovMsg"></p>
+  <button class="primary" id="ovBtn">Return to test</button>
+</div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmtQ = s => esc(s).replace(/`([^`]+)`/g,"<code>$1</code>");
+const show = id => document.querySelectorAll(".screen").forEach(s=>s.classList.toggle("on", s.id===id));
+function toast(m){ const t=$("toast"); t.textContent=m; t.classList.add("on"); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("on"),2400); }
+const LS = { get(k){ try{return JSON.parse(localStorage.getItem(k));}catch{return null;} }, set(k,v){ try{localStorage.setItem(k,JSON.stringify(v));}catch{} }, del(k){ try{localStorage.removeItem(k);}catch{} } };
+
+let TEST=null, S=null, FILES={}, timerId=null, lastPdf=null, submitting=false;
+const MAXV = () => TEST.maxViolations || 2;
+const locked = () => S && S.phase==="test" && !submitting;
+const save = () => LS.set("itest-session", S);
+
+/* ---------- boot ---------- */
+(async function(){
+  try{ TEST = await (await fetch("/api/test")).json(); }catch{ TEST=null; }
+  const done = LS.get("itest-done");
+  if(done && TEST && done.version===TEST.version){ $("closedMsg").textContent="You have already submitted this test. It is now closed on this device."; show("s-closed"); return; }
+  if(!TEST || !TEST.ready){ show("s-none"); return; }
+  $("tTitle").textContent=TEST.title; document.title=TEST.title;
+  const n=TEST.questions.length;
+  $("tMeta").textContent=`${n} question${n>1?"s":""} · ${TEST.duration} minutes · one attempt`;
+  $("ruleMax").textContent=`${MAXV()} violation${MAXV()>1?"s":""} submit your test automatically.`;
+  $("maxV").textContent=MAXV();
+
+  S = LS.get("itest-session");
+  if(S && S.phase==="test" && S.version===TEST.version){
+    S.log.push({t:stamp(), reason:"Reloaded the page"}); S.strikes++; save();
+    if(S.strikes>=MAXV()) return finish(`Auto-submitted after ${MAXV()} violations`);
+    beginTest();
+    const hasFileQ = TEST.questions.some(q=>q.type==="file");
+    showOverlay("Page was reloaded", `Reloading counts as a violation (${S.strikes} of ${MAXV()}). Your answers and timer were kept${hasFileQ?", but attached files must be added again":""}.`);
+  } else { S=null; show("s-start"); }
+})();
+
+/* ---------- start ---------- */
+$("startBtn").onclick = async () => {
+  $("startErr").textContent=""; $("startBtn").disabled=true;
+  try{
+    const r = await fetch("/api/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:$("name").value,email:$("email").value})});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error||"Couldn't start the test.");
+    S = {phase:"test", sessionId:d.sessionId, name:$("name").value.trim(), startedAt:d.startedAt, answers:{}, idx:0, strikes:0, log:[], version:TEST.version};
+    save(); enterFullscreen(); beginTest();
+  }catch(e){ $("startErr").textContent=e.message; }
+  $("startBtn").disabled=false;
+};
+
+/* ---------- test ---------- */
+const Q = () => TEST.questions;
+function stamp(){ const s=Math.max(0,Math.floor((Date.now()-S.startedAt)/1000)); return String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0"); }
+function answered(i){ const q=Q()[i]; if(q.type==="file") return (FILES[i]||[]).length>0; const a=S.answers[i]; return a!==undefined && a!==null && !(typeof a==="string"&&!a.trim()); }
+
+function beginTest(){
+  document.body.classList.add("locked"); show("s-test"); trapBack(); renderQ();
+  clearInterval(timerId); tick(); timerId=setInterval(tick,1000);
+}
+function renderQ(){
+  const i=S.idx, q=Q()[i];
+  let h=`<p class="qnum">Question ${i+1} of ${Q().length}</p><h2>${fmtQ(q.q)}</h2>`;
+  if(q.type==="mcq") q.options.forEach((o,k)=>{ h+=`<label class="opt"><input type="radio" name="a" value="${k}" ${S.answers[i]===k?"checked":""}><span>${esc(o)}</span></label>`; });
+  else if(q.type==="text") h+=`<textarea id="ta" aria-label="Your answer" placeholder="Type your answer here">${esc(S.answers[i]||"")}</textarea>`;
+  else {
+    const fl=FILES[i]||[];
+    h+=`<div class="drop ${fl.length?"has":""}">
+      <p style="margin:0 0 .8rem">Attach your file${fl.length?"s":""} here (up to ${TEST.maxFileMb} MB each).</p>
+      <label class="btn primary" for="fi">Choose files</label>
+      <input id="fi" type="file" multiple hidden>
+      <ul class="filelist">${fl.map((f,k)=>`<li><span>${esc(f.name)} · ${(f.size/1024/1024).toFixed(2)} MB</span><button class="danger small" data-rm="${k}">Remove</button></li>`).join("")}</ul>
+    </div>`;
+  }
+  $("qbox").innerHTML=h;
+  $("qbox").querySelectorAll("input[type=radio]").forEach(r=>r.onchange=()=>{ S.answers[i]=+r.value; save(); renderDots(); });
+  const ta=$("ta"); if(ta) ta.oninput=()=>{ S.answers[i]=ta.value; save(); renderDots(); };
+  const fi=$("fi"); if(fi){
+    fi.onchange=()=>{
+      const add=[...fi.files], big=add.filter(f=>f.size>TEST.maxFileMb*1024*1024);
+      if(big.length) toast(`${big[0].name} is over ${TEST.maxFileMb} MB and was skipped.`);
+      FILES[i]=(FILES[i]||[]).concat(add.filter(f=>f.size<=TEST.maxFileMb*1024*1024)); renderQ();
+    };
+    $("qbox").querySelectorAll("[data-rm]").forEach(b=>b.onclick=()=>{ FILES[i].splice(+b.dataset.rm,1); renderQ(); });
+  }
+  $("prevBtn").disabled=i===0;
+  $("nextBtn").textContent=i===Q().length-1?"Review & submit":"Next";
+  renderDots();
+}
+function renderDots(){
+  const n=Q().filter((_,i)=>answered(i)).length;
+  $("prog").style.width=(n/Q().length*100)+"%";
+  $("dots").innerHTML=Q().map((_,i)=>`<button class="${answered(i)?"done":""} ${i===S.idx?"cur":""}" data-i="${i}" aria-label="Question ${i+1}">${i+1}</button>`).join("");
+  $("dots").querySelectorAll("button").forEach(b=>b.onclick=()=>{ S.idx=+b.dataset.i; save(); renderQ(); });
+}
+$("prevBtn").onclick=()=>{ if(S.idx>0){ S.idx--; save(); renderQ(); } };
+$("nextBtn").onclick=()=>{ if(S.idx<Q().length-1){ S.idx++; save(); renderQ(); } else confirmSubmit(); };
+$("submitTop").onclick=confirmSubmit;
+function confirmSubmit(){
+  const left=Q().length-Q().filter((_,i)=>answered(i)).length;
+  if(confirm(left?`You have ${left} unanswered question${left>1?"s":""}. Submit anyway?`:"Submit your test? You can't change answers after this.")) finish("Submitted by candidate");
+}
+function tick(){
+  const left=Math.max(0,TEST.duration*60-Math.floor((Date.now()-S.startedAt)/1000));
+  $("clock").textContent=String(Math.floor(left/60)).padStart(2,"0")+":"+String(left%60).padStart(2,"0");
+  $("clock").classList.toggle("low",left<=60);
+  $("strikes").textContent=S.strikes;
+  if(left===0) finish("Time ran out");
+}
+
+/* ---------- lock-down ---------- */
+function enterFullscreen(){ const el=document.documentElement; try{ const p=(el.requestFullscreen||el.webkitRequestFullscreen||function(){}).call(el); if(p&&p.catch)p.catch(()=>{}); }catch{} }
+const isFs=()=>!!(document.fullscreenElement||document.webkitFullscreenElement);
+const fsOk=()=>!!(document.fullscreenEnabled||document.webkitFullscreenEnabled);
+let lastStrike=0;
+function strike(reason){
+  if(!locked()) return;
+  if(Date.now()-lastStrike<1500) return; lastStrike=Date.now();
+  S.strikes++; S.log.push({t:stamp(),reason}); save(); $("strikes").textContent=S.strikes;
+  if(S.strikes>=MAXV()) return finish(`Auto-submitted after ${MAXV()} violations`);
+  const left=MAXV()-S.strikes;
+  showOverlay("You left the test",`${reason}. This is violation ${S.strikes} of ${MAXV()}. ${left===1?"One more":left+" more"} and your test is submitted automatically.`);
+}
+function showOverlay(t,m){ $("ovTitle").textContent=t; $("ovMsg").textContent=m; $("ov").classList.add("on"); }
+$("ovBtn").onclick=()=>{ $("ov").classList.remove("on"); if(fsOk()&&!isFs()) enterFullscreen(); };
+document.addEventListener("visibilitychange",()=>{ if(document.hidden) strike("Switched tab or minimised the window"); });
+let blurT; window.addEventListener("blur",()=>{ if(!locked())return; blurT=setTimeout(()=>{ if(!document.hidden&&!document.hasFocus()) strike("Moved focus to another window"); },400); });
+window.addEventListener("focus",()=>clearTimeout(blurT));
+["fullscreenchange","webkitfullscreenchange"].forEach(ev=>document.addEventListener(ev,()=>{ if(locked()&&!isFs()&&fsOk()) strike("Exited full screen"); }));
+function trapBack(){ try{ history.pushState({lock:1},"",location.href); }catch{} }
+window.addEventListener("popstate",()=>{ if(locked()){ trapBack(); toast("Going back is disabled until you submit the test."); } });
+window.addEventListener("beforeunload",e=>{ if(locked()){ e.preventDefault(); e.returnValue=""; return ""; } });
+["copy","cut","paste","contextmenu","dragstart"].forEach(ev=>document.addEventListener(ev,e=>{ if(locked()){ e.preventDefault(); toast(ev==="contextmenu"?"Right-click is disabled during the test.":"Copy and paste are disabled during the test."); } }));
+document.addEventListener("keydown",e=>{
+  if(!locked())return;
+  const k=e.key.toLowerCase(), mod=e.ctrlKey||e.metaKey;
+  if(k==="f5"||k==="f12"||(mod&&["r","p","s","u","c","v","x"].includes(k))||(mod&&e.shiftKey&&["i","j","c"].includes(k))||(e.altKey&&k==="arrowleft")){ e.preventDefault(); toast("That shortcut is disabled during the test."); }
+});
+
+/* ---------- submit ---------- */
+function downloadPdf(blob){
+  const url=URL.createObjectURL(blob), a=document.createElement("a");
+  a.href=url; a.download=`${(S.name||"result").replace(/[^\w\- ]+/g,"").replace(/ /g,"_")}_result.pdf`;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),10000);
+}
+async function finish(reason){
+  if(submitting) return; submitting=true;
+  clearInterval(timerId); $("ov").classList.remove("on");
+  document.body.classList.remove("locked");
+  try{ if(isFs())(document.exitFullscreen||document.webkitExitFullscreen).call(document); }catch{}
+  show("s-sending");
+  const fd=new FormData();
+  fd.append("payload",JSON.stringify({sessionId:S.sessionId, answers:S.answers, strikes:S.strikes, log:S.log, reason}));
+  Object.entries(FILES).forEach(([i,list])=>list.forEach(f=>fd.append("file_"+i,f,f.name)));
+  for(let attempt=0; attempt<3; attempt++){
+    try{
+      const r=await fetch("/api/submit",{method:"POST",body:fd});
+      if(r.status===409){ break; }
+      if(!r.ok){ const d=await r.json().catch(()=>({})); throw new Error(d.error||"Submit failed"); }
+      lastPdf=await r.blob(); downloadPdf(lastPdf);
+      LS.set("itest-done",{version:TEST.version, at:Date.now()}); LS.del("itest-session");
+      if(reason!=="Submitted by candidate") $("closedMsg").textContent=`${reason}. Your answers were submitted and a PDF copy was downloaded to your device. You can close this page now.`;
+      $("redl").hidden=false; show("s-closed"); return;
+    }catch(e){
+      if(attempt===2){ $("closedMsg").textContent="Your answers couldn't be sent: "+e.message+". Keep this page open and tell the interviewer."; $("closedMsg").style.color="var(--bad)"; show("s-closed"); submitting=false; return; }
+      await new Promise(r=>setTimeout(r,1500));
+    }
+  }
+  LS.set("itest-done",{version:TEST.version, at:Date.now()}); LS.del("itest-session");
+  $("closedMsg").textContent="This test was already submitted. It is now closed."; show("s-closed");
+}
+$("redl").onclick=()=>{ if(lastPdf) downloadPdf(lastPdf); };
+</script>
+</body>
+</html>

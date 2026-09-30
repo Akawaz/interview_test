@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin · Interview Test</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛠️</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<div class="adminbar" id="bar" hidden><div class="in">
+  <b>Admin</b>
+  <button class="tab small" data-tab="edit">Questions</button>
+  <button class="tab small" data-tab="settings">Settings</button>
+  <button class="tab small" data-tab="results">Results</button>
+  <a class="tab small btn" href="/" target="_blank" rel="noopener">Open test</a>
+  <button class="tab small" id="logout">Sign out</button>
+</div></div>
+
+<section id="s-login" class="screen on"><div class="wrap" style="max-width:420px"><div class="card">
+  <h1>Admin sign in</h1>
+  <p class="lead">Enter the admin password set on the server.</p>
+  <div class="field"><label class="f" for="pw">Password</label><input id="pw" type="password" autocomplete="current-password"></div>
+  <button class="primary" id="loginBtn">Sign in</button>
+  <p class="err" id="loginErr"></p>
+</div></div></section>
+
+<section id="s-edit" class="screen"><div class="wrap">
+  <h1>Questions</h1>
+  <p class="lead">Candidates see exactly what you save. Mark the correct option with the green circle.</p>
+  <div id="edList"></div>
+  <div class="row">
+    <button class="ghost" id="addMcq">Add multiple-choice</button>
+    <button class="ghost" id="addText">Add written answer</button>
+    <button class="ghost" id="addFile">Add file upload</button>
+    <span class="spacer"></span>
+    <button class="primary saveBtn">Save test</button>
+  </div>
+  <p class="hint saveState"></p>
+</div></section>
+
+<section id="s-settings" class="screen"><div class="wrap">
+  <h1>Settings</h1>
+  <p class="lead">These apply to every candidate who opens the test link.</p>
+  <div class="card">
+    <div class="field"><label class="f" for="edTitle">Test title</label><input id="edTitle" type="text"></div>
+    <div class="grid2">
+      <div class="field"><label class="f" for="edDur">Time limit (minutes)</label><input id="edDur" type="number" min="1" max="600"></div>
+      <div class="field"><label class="f" for="edMax">Violations before auto-submit</label><input id="edMax" type="number" min="1" max="10"></div>
+    </div>
+    <div class="field"><label class="f" for="edEmail">Send results to</label><input id="edEmail" type="email">
+      <p class="hint">Each submission is emailed here with the PDF report and any files the candidate attached.</p></div>
+    <div class="row">
+      <button class="primary saveBtn">Save settings</button>
+      <button class="ghost" id="testMail">Send a test email</button>
+    </div>
+    <p class="hint saveState"></p>
+    <p class="hint" id="mailMode"></p>
+  </div>
+</div></section>
+
+<section id="s-results" class="screen"><div class="wrap">
+  <div class="row"><h1>Results</h1><span class="spacer"></span><button class="ghost small" id="refresh">Refresh</button></div>
+  <div id="resList"></div>
+</div></section>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmtQ = s => esc(s).replace(/`([^`]+)`/g,"<code>$1</code>");
+const show = id => document.querySelectorAll(".screen").forEach(s=>s.classList.toggle("on", s.id===id));
+function toast(m){ const t=$("toast"); t.textContent=m; t.classList.add("on"); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("on"),2600); }
+async function api(url, opts={}){
+  const r = await fetch(url, {headers:{"Content-Type":"application/json"}, ...opts});
+  const d = await r.json().catch(()=>({}));
+  if(r.status===401 && !url.includes("login")){ show("s-login"); $("bar").hidden=true; throw new Error("Signed out"); }
+  if(!r.ok) throw new Error(d.error||"Request failed");
+  return d;
+}
+let CFG=null, dirty=false;
+
+(async function(){
+  const me = await api("/api/admin/me").catch(()=>({admin:false}));
+  if(me.admin) enter(me.mail);
+})();
+$("pw").onkeydown=e=>{ if(e.key==="Enter") $("loginBtn").click(); };
+$("loginBtn").onclick=async()=>{
+  $("loginErr").textContent="";
+  try{ await api("/api/admin/login",{method:"POST",body:JSON.stringify({password:$("pw").value})}); const me=await api("/api/admin/me"); enter(me.mail); }
+  catch(e){ $("loginErr").textContent=e.message; }
+};
+$("logout").onclick=async()=>{ await api("/api/admin/logout",{method:"POST"}).catch(()=>{}); location.reload(); };
+
+async function enter(mode){
+  CFG = await api("/api/admin/config");
+  $("bar").hidden=false;
+  $("mailMode").textContent = mode==="none" ? "⚠ Email isn't configured on the server yet. Set RESEND_API_KEY or SMTP settings in Railway." : `Email is sent using ${mode==="resend"?"Resend":"SMTP"}.`;
+  setTab(CFG.questions.length ? "results" : "edit");
+}
+function setTab(t){
+  document.querySelectorAll(".tab[data-tab]").forEach(b=>b.setAttribute("aria-pressed", b.dataset.tab===t));
+  if(t==="edit"){ drawQs(); show("s-edit"); }
+  if(t==="settings"){ $("edTitle").value=CFG.title; $("edDur").value=CFG.duration; $("edMax").value=CFG.maxViolations; $("edEmail").value=CFG.adminEmail; show("s-settings"); }
+  if(t==="results"){ show("s-results"); loadResults(); }
+}
+document.querySelectorAll(".tab[data-tab]").forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
+window.addEventListener("beforeunload",e=>{ if(dirty){ e.preventDefault(); e.returnValue=""; } });
+function markDirty(){ dirty=true; document.querySelectorAll(".saveState").forEach(p=>p.textContent="Unsaved changes"); }
+
+["edTitle","edDur","edMax","edEmail"].forEach(id=>$(id).oninput=()=>{
+  CFG.title=$("edTitle").value; CFG.duration=+$("edDur").value; CFG.maxViolations=+$("edMax").value; CFG.adminEmail=$("edEmail").value; markDirty();
+});
+
+/* ---------- question editor ---------- */
+const TYPES={mcq:"Multiple choice",text:"Written answer",file:"File upload"};
+function drawQs(){
+  const L=$("edList"), qs=CFG.questions;
+  if(!qs.length){ L.innerHTML=`<p class="empty">No questions yet. Add your first one below.</p>`; return; }
+  L.innerHTML=qs.map((q,i)=>`
+  <div class="qed" data-i="${i}">
+    <div class="head">
+      <strong>Question ${i+1}</strong>
+      <select data-k="type" aria-label="Question type">${Object.entries(TYPES).map(([k,v])=>`<option value="${k}" ${q.type===k?"selected":""}>${v}</option>`).join("")}</select>
+      <button class="ghost small" data-act="up" ${i===0?"disabled":""} aria-label="Move up">↑</button>
+      <button class="ghost small" data-act="down" ${i===qs.length-1?"disabled":""} aria-label="Move down">↓</button>
+      <button class="danger small" data-act="del">Delete</button>
+    </div>
+    <textarea data-k="q" placeholder="${q.type==="file"?"e.g. Upload your CV or your solution file":"Type the question"}">${esc(q.q)}</textarea>
+    ${q.type==="mcq"?`
+      <div style="margin-top:.6rem">${q.options.map((o,k)=>`
+        <div class="optrow">
+          <input type="radio" name="c${i}" data-correct="${k}" ${q.correct===k?"checked":""} aria-label="Mark option ${k+1} correct">
+          <input type="text" data-opt="${k}" value="${esc(o)}" placeholder="Option ${k+1}">
+          <button class="ghost small" data-delopt="${k}" ${q.options.length<=2?"disabled":""} aria-label="Remove option">✕</button>
+        </div>`).join("")}</div>
+      <button class="ghost small" data-act="addopt" style="margin-top:.4rem">Add option</button>
+      ${q.correct==null?`<p class="hint" style="color:var(--bad)">Pick the correct answer.</p>`:""}`
+    : q.type==="file" ? `<p class="hint">The candidate attaches one or more files (up to 10 MB each). They're emailed to you and kept in Results.</p>`
+    : `<p class="hint">You review written answers yourself in Results and in the PDF.</p>`}
+  </div>`).join("");
+  L.querySelectorAll(".qed").forEach(box=>{
+    const i=+box.dataset.i, q=qs[i];
+    box.querySelector('[data-k="q"]').oninput=e=>{ q.q=e.target.value; markDirty(); };
+    box.querySelector('[data-k="type"]').onchange=e=>{ q.type=e.target.value; if(q.type==="mcq"&&!q.options){ q.options=["",""]; q.correct=null; } markDirty(); drawQs(); };
+    box.querySelectorAll("[data-opt]").forEach(inp=>inp.oninput=e=>{ q.options[+inp.dataset.opt]=e.target.value; markDirty(); });
+    box.querySelectorAll("[data-correct]").forEach(r=>r.onchange=()=>{ q.correct=+r.dataset.correct; markDirty(); drawQs(); });
+    box.querySelectorAll("[data-delopt]").forEach(b=>b.onclick=()=>{ const k=+b.dataset.delopt; q.options.splice(k,1); if(q.correct===k)q.correct=null; else if(q.correct>k)q.correct--; markDirty(); drawQs(); });
+    box.querySelectorAll("[data-act]").forEach(b=>b.onclick=()=>{
+      const a=b.dataset.act;
+      if(a==="del"){ if(!confirm("Delete this question?")) return; qs.splice(i,1); }
+      if(a==="up") [qs[i-1],qs[i]]=[qs[i],qs[i-1]];
+      if(a==="down") [qs[i+1],qs[i]]=[qs[i],qs[i+1]];
+      if(a==="addopt") q.options.push("");
+      markDirty(); drawQs();
+    });
+  });
+}
+$("addMcq").onclick=()=>{ CFG.questions.push({type:"mcq",q:"",options:["","","",""],correct:null}); markDirty(); drawQs(); };
+$("addText").onclick=()=>{ CFG.questions.push({type:"text",q:""}); markDirty(); drawQs(); };
+$("addFile").onclick=()=>{ CFG.questions.push({type:"file",q:""}); markDirty(); drawQs(); };
+document.querySelectorAll(".saveBtn").forEach(b=>b.onclick=async()=>{
+  const st=document.querySelectorAll(".saveState");
+  st.forEach(p=>p.textContent="Saving…");
+  try{
+    const clean = {...CFG, questions: CFG.questions.map(q=>({...q, options: q.options?.map(o=>o.trim())}))};
+    CFG = await api("/api/admin/config",{method:"PUT",body:JSON.stringify(clean)});
+    dirty=false; st.forEach(p=>p.textContent="Saved. Candidates will see this version."); toast("Saved");
+  }catch(e){ st.forEach(p=>p.textContent="Couldn't save: "+e.message); toast(e.message); }
+});
+$("testMail").onclick=async()=>{
+  if(dirty) return toast("Save settings first.");
+  $("testMail").disabled=true;
+  try{ await api("/api/admin/test-email",{method:"POST"}); toast("Test email sent to "+CFG.adminEmail); }
+  catch(e){ toast("Email failed: "+e.message); }
+  $("testMail").disabled=false;
+};
+
+/* ---------- results ---------- */
+async function loadResults(){
+  const L=$("resList"); L.innerHTML=`<p class="empty">Loading…</p>`;
+  let rs; try{ rs=await api("/api/admin/results"); }catch(e){ L.innerHTML=`<p class="empty">${esc(e.message)}</p>`; return; }
+  if(!rs.length){ L.innerHTML=`<p class="empty">No submissions yet. Send candidates the test link: <b>${esc(location.origin)}/</b></p>`; return; }
+  L.innerHTML=rs.map(r=>{
+    const secs=Math.round((r.finishedAt-r.startedAt)/1000);
+    const rows=r.questions.map((q,i)=>{
+      const a=r.answers[i]; let ans, mark="";
+      if(q.type==="mcq"){ ans=a==null?"<em>No answer</em>":esc(q.options[a]); mark=a===q.correct?'<span class="ok">Correct</span>':'<span class="no">Wrong</span>'; }
+      else if(q.type==="file"){ const fl=r.files.filter(f=>f.question===i); ans=fl.length?fl.map(f=>`<a href="/api/admin/results/${r.id}/files/${encodeURIComponent(f.stored)}">${esc(f.originalName)}</a>`).join("<br>"):"<em>No file</em>"; mark="File"; }
+      else { ans=a&&String(a).trim()?esc(a).replace(/\n/g,"<br>"):"<em>No answer</em>"; mark="Review"; }
+      return `<tr><td>${i+1}</td><td>${fmtQ(q.q)}</td><td>${ans}</td><td>${mark}</td></tr>`;
+    }).join("");
+    const sent=r.email_status==="sent";
+    return `<details class="rcard"><summary>
+      <span class="nm">${esc(r.name)}</span>
+      <span class="pill">${r.score} / ${r.outOf}</span>
+      ${r.strikes?`<span class="pill bad">${r.strikes} violation${r.strikes>1?"s":""}</span>`:""}
+      <span class="pill ${sent?"good":"bad"}">${sent?"Emailed":"Email not sent"}</span>
+      <span class="pill">${new Date(r.finishedAt).toLocaleString()}</span></summary>
+      <p class="meta">${esc(r.email)} · time taken ${Math.floor(secs/60)}m ${secs%60}s · ${esc(r.reason)}</p>
+      ${!sent?`<div class="flag">Email status: ${esc(r.email_status)}</div>`:""}
+      ${r.log.length?`<div class="flag">${r.log.map(l=>`${esc(l.t)} — ${esc(l.reason)}`).join("<br>")}</div>`:""}
+      <div class="tbl"><table><tr><th>#</th><th>Question</th><th>Answer</th><th></th></tr>${rows}</table></div>
+      <div class="row" style="margin-top:1rem">
+        <a class="btn primary small" href="/api/admin/results/${r.id}/pdf" target="_blank" rel="noopener">Open PDF</a>
+        <button class="ghost small" data-resend="${r.id}">Resend email</button>
+        <span class="spacer"></span>
+        <button class="danger small" data-del="${r.id}">Delete & allow retake</button>
+      </div>
+    </details>`;
+  }).join("");
+  L.querySelectorAll("[data-resend]").forEach(b=>b.onclick=async()=>{
+    b.disabled=true;
+    try{ const d=await api(`/api/admin/results/${b.dataset.resend}/resend`,{method:"POST"}); toast(d.email_status==="sent"?"Email sent":"Email failed: "+d.email_status); loadResults(); }
+    catch(e){ toast(e.message); b.disabled=false; }
+  });
+  L.querySelectorAll("[data-del]").forEach(b=>b.onclick=async()=>{
+    if(!confirm("Delete this result? The candidate will be able to take the test again with the same email.")) return;
+    try{ await api(`/api/admin/results/${b.dataset.del}`,{method:"DELETE"}); toast("Deleted"); loadResults(); }catch(e){ toast(e.message); }
+  });
+}
+$("refresh").onclick=loadResults;
+</script>
+</body>
+</html>
